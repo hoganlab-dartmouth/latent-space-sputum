@@ -1,0 +1,405 @@
+---
+title: "Clinically relevent RNASeq clustering in latent feature space"
+output: html_notebook
+author: Georgia.Doing.GR@Dartmouth.edu
+date: May 1, 2020
+editor_options: 
+  chunk_output_type: inline
+---
+### Background
+
+  Our lab has collected RNAseq data from *P. aeruginosa* treated with sub-inhibitory concentrations of the common fermentation product ethanol, *P.a.* - *C. albicans* co-culture and *P.a.* grown in *ex vivo* CF sputum samples. While these three datasets were not from the same experiment, they may have some similarities due to the prevalence of both *P.a.* and *C.a.* as well as detectable ethanol in sputa, generally speaking. Moreover, the complexity of *P.a.* transcriptional responses in these datasets make them interesting test cases for the application of eADAGE latent feature space for analysis.
+  
+### Goals
+  
+  This analysis aims to cluster these datasets in raw gene expression space as well as eADAGE latent feature space and assess the relative differences in variance and overall interpretability, especially with respect to known biological replicate samples.
+  
+### Hypothesis
+
+  Transforming gene expression data into latent feature space will improve biologically driven clustering as measured by the concordance of unsupervised heirarchical clustering with a priori known experimental groups and an increase in the clustering coefficient of those same groups.
+
+### Outline
+
+  1. Compute normalized gene space and latent feature space
+  2. Visualize hierarchically clustered datasets
+  3. Assess clustering with bootstrapping
+  4. Assess clustering wrt biological groupings
+
+```{r}
+library(ADAGEpath)
+library(DT)
+library(readr)
+library(plyr)
+library(ggplot2)
+library(ggridges)
+library(pvclust)
+library(dendextend)
+library(kableExtra)
+source('sse.R')
+```
+
+```{r, setup, include=F}
+knitr::opts_chunk$set(warning=F, message=F)
+```
+
+## Data setup in gene expression and latent space
+
+```{r}
+model <- eADAGEmodel
+compendium <- PAcompendium
+probe_dist <- probedistribution
+```
+
+#### Load gene expression data data
+
+Ethanol dataset 
+
+```{r, message=F}
+ccm_RNAseq_files <- list.files("download/etoh_rnaseq/all_samples//",
+                           pattern = "*.csv")
+ccm_RNAseq_file_paths <- file.path("download/etoh_rnaseq/all_samples//", ccm_RNAseq_files)
+ccm_RNAseq_samples <- lapply(ccm_RNAseq_file_paths,
+                         function(x) readr::read_csv(x, col_names = FALSE))
+cocul_mops_data <-  plyr::join_all(ccm_RNAseq_samples, by = "X1")
+colnames(cocul_mops_data) <- c("geneID", ccm_RNAseq_files)
+
+cocul_mops_data$geneID <- sapply(cocul_mops_data$geneID,
+                             function(x) unlist(strsplit(x, ","))[1])
+```
+
+Coculture dataset
+
+```{r}
+cocul_data <- read.csv('Expression Browser-sampled.csv', sep=',', stringsAsFactors = FALSE)
+cocul_data <- data.frame(apply(cocul_data, c(1,2), FUN = function(x) sub(',','.',x)))
+cocul_data <- cocul_data[, c(1,grep("TPM", colnames(cocul_data)))]
+colnames(cocul_data) <- sapply(colnames(cocul_data), function(x) substr(x,1,4))
+
+colnames(cocul_data)[1] <- 'geneID'
+cocul_data$geneID <- as.character(cocul_data$geneID)
+cocul_data[,c(2:14)] <- apply(cocul_data[,c(2:14)],2, FUN = function(x) as.numeric(as.character(x)))
+```
+
+Sputum dataset
+```{r}
+sputum_data <- read.csv('UniqueReads_2018.csv', sep=',', stringsAsFactors = FALSE)
+colnames(sputum_data)[1] <- 'geneID'
+```
+
+#### Load all dataset via ADAGEpath
+
+```{r, results = "hide", warning=FALSE, echo=F, message=F}
+sp_data_raw <- load_dataset(input = sputum_data, isProcessed = TRUE,
+                         isRNAseq = TRUE, model = model,
+                         compendium = compendium, quantile_ref = probe_dist,
+                         norm01 = FALSE)
+
+cc_data_raw <- load_dataset(input = cocul_data, isProcessed = TRUE,
+                         isRNAseq = TRUE, model = model,
+                         compendium = compendium, quantile_ref = probe_dist,
+                         norm01 = FALSE)
+
+ccm_data_raw <- load_dataset(input = cocul_mops_data, isProcessed = TRUE,
+                         isRNAseq = TRUE, model = model,
+                         compendium = compendium, quantile_ref = probe_dist,
+                         norm01 = FALSE)
+
+```
+
+#### Normalize gene expression values
+
+```{r}
+sp_data_normed <- zeroone_norm(input_data = sp_data_raw, use_ref = TRUE,
+                            ref_data = compendium)
+
+cc_data_normed <- zeroone_norm(input_data = cc_data_raw, use_ref = TRUE,
+                            ref_data = compendium)
+
+ccm_data_normed <- zeroone_norm(input_data = ccm_data_raw, use_ref = TRUE,
+                            ref_data = compendium)
+```
+
+#### Calculate latent space feature activities
+
+```{r, warning=F, message=F}
+sp_data_activity <- calculate_activity(input_data = sp_data_normed, model = model)
+
+cc_data_activity <- calculate_activity(input_data = cc_data_normed, model = model)
+
+ccm_data_activity <- calculate_activity(input_data = ccm_data_normed, model = model)
+```
+
+## Visualize data with heirarchical clustering
+
+#### Ethanol data
+
+By gene expression:
+```{r, fig.width=6}
+par(mfrow=c(1,2))
+
+gene_dists_ccm <- dist(t(ccm_data_normed[,c(2:25)]))
+gene_clust_ccm <- hclust(gene_dists_ccm)
+plot(gene_clust_ccm, main = 'By Gene Expression')
+
+node_dists_ccm <- dist(t(ccm_data_activity[,c(2:25)]))
+node_clust_ccm <- hclust(node_dists_ccm)
+plot(node_clust_ccm, main = 'By Feature Activity')
+```
+
+
+
+#### Colculture data
+
+By gene expression:
+
+```{r, fig.width=6}
+par(mfrow=c(1,2))
+
+gene_dists_cc <- dist(t(cc_data_normed[,c(2:14)]))
+gene_clust_cc <- hclust(gene_dists_cc)
+plot(gene_clust_cc, main = 'By Gene Expression')
+
+node_dists_cc <- dist(t(cc_data_activity[,c(2:14)]))
+node_clust_cc <- hclust(node_dists_cc)
+plot(node_clust_cc, main = 'By Feature Activity')
+```
+
+#### Sputum data
+
+By gene expression:
+
+```{r, warning=F, fig.width=6}
+par(mfrow=c(1,2))
+
+gene_dists <- dist(t(sp_data_normed[,c(2:25)]))
+gene_clust <- hclust(gene_dists)
+plot(gene_clust, main = 'By Gene Expression')
+
+node_dists <- dist(t(sp_data_activity[,c(2:25)]))
+node_clust <- hclust(node_dists)
+plot(node_clust, main = 'By Feature Activity')
+```
+
+
+
+## Assessment statistics with bootstrapping
+
+#### Ethanol data
+```{r, fig.width=6, message=F, warning=F}
+par(mfrow=c(1,2))
+
+p_clust_ccm <- pvclust(ccm_data_normed[,c(2:25)], method.hclust="complete")
+plot(p_clust_ccm, main = 'By Gene Expression')
+
+p_clust_ccm_a <- pvclust(ccm_data_activity[,c(2:25)], method.hclust = "complete")
+plot(p_clust_ccm_a, main = 'By Feature Activity')
+```
+
+#### Coculture data
+```{r, fig.width=6, message=F, warning=F}
+par(mfrow=c(1,2))
+
+p_clust_cc <- pvclust(cc_data_normed[,c(2:14)], method.hclust="complete")
+plot(p_clust_cc, main = 'By Gene Expression')
+
+p_clust_cc_a <- pvclust(cc_data_activity[,c(2:14)], method.hclust = "complete")
+plot(p_clust_cc_a, main = 'By Feature Activity')
+```
+
+#### Sputum data
+```{r, fig.width=6, message=F, warning=F}
+par(mfrow=c(1,2))
+
+p_clust_sp <- pvclust(sp_data_normed[,c(2:14)], method.hclust="complete")
+plot(p_clust_sp, main = 'By Gene Expression')
+
+p_clust_sp_a <- pvclust(sp_data_activity[,c(2:14)], method.hclust = "complete")
+plot(p_clust_sp_a, main = 'By Feature Activity')
+```
+
+
+
+```{r}
+par(mfrow=c(1,2))
+dend_ccm_g <- t(ccm_data_activity[,c(2:25)]) %>% dist %>% hclust %>% as.dendrogram
+dend_ccm_g %>% set("labels_col", value = c(3,4,5,6,7,8), k=6) %>% plot
+
+
+dend_ccm_n <- t(ccm_data_normed[,c(2:25)]) %>% dist %>% hclust %>% as.dendrogram
+dend_ccm_n %>% set("labels_col", value = c(3,4,5,6,7,8), k=6) %>% plot
+```
+
+
+
+
+```{r}
+par(mfrow=c(1,2))
+dend_cc_g <- t(cc_data_activity[,c(2:14)]) %>% dist %>% hclust %>% as.dendrogram
+dend_cc_g %>% set("labels_col", value = c(3,4,5), k=3) %>% plot
+
+
+dend_cc_n <- t(cc_data_normed[,c(2:14)]) %>% dist %>% hclust %>% as.dendrogram
+dend_cc_n %>% set("labels_col", value = c(3,4,5), k=3) %>% plot
+```
+
+```{r}
+par(mfrow=c(1,2))
+dend_sp_n <- t(sp_data_activity[,c("ctrl_1","ctrl_2","ctrl_3","sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A")]) %>% dist %>% hclust %>% as.dendrogram
+dend_sp_n %>% set("labels_col", value = c(3,4,5), k=2) %>% plot
+
+
+dend_sp_g <- t(sp_data_normed[,c("ctrl_1","ctrl_2","ctrl_3","sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A")]) %>% dist %>% hclust %>% as.dendrogram
+dend_sp_g %>% set("labels_col", value = c(3,4,5), k=2) %>% plot
+```
+
+
+```{r}
+par(mfrow=c(1,2))
+joint_data_activity <- cbind(cbind(sp_data_activity[,c("ctrl_1","ctrl_2","ctrl_3","sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A")], cc_data_activity[,c(2:14)]),
+                             ccm_data_activity[,c(2:9)])
+
+dend_joint_n <- t(joint_data_activity) %>% dist %>% hclust %>% as.dendrogram
+dend_joint_n %>% set("labels_col", value = c(3,4,5,6,7), k=4) %>% plot
+
+joint_data_normed <- cbind(cbind(sp_data_normed[,c("ctrl_1","ctrl_2","ctrl_3","sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A")], cc_data_normed[,c(2:14)]),
+                           ccm_data_normed[,c(2:9)])
+
+dend_joint_g <- t(joint_data_normed) %>% dist %>% hclust %>% as.dendrogram
+dend_joint_g %>% set("labels_col", value = c(3,4,5,6,7), k=4) %>% plot
+```
+
+
+## Assessment by clustering
+
+#### Ethanol
+
+```{r}
+rand_group22_a <- sample(c(2:9),2)
+rand_group22_b <- setdiff(c(2:9),rand_group_a)
+
+ccm22_norm_rand_sse <- sse_ratio(ccm_data_normed[,rand_group_a], 
+          ccm_data_normed[,rand_group_b])
+
+ccm22_act_rand_sse <- sse_ratio(ccm_data_activity[,rand_group_a], 
+          ccm_data_activity[,rand_group_b])
+```
+
+```{r}
+ccm22_norm_sse1 <- sse_ratio(ccm_data_normed[,c(2,3)], 
+          ccm_data_normed[,c(4,5)])
+
+ccm22_act_sse1 <- sse_ratio(ccm_data_activity[,c(2,3)], 
+          ccm_data_activity[,c(4,5)])
+
+ccm22_norm_sse2 <- sse_ratio(ccm_data_normed[,c(6,7)], 
+          ccm_data_normed[,c(8,9)])
+
+ccm22_act_sse2 <- sse_ratio(ccm_data_activity[,c(6,7)], 
+          ccm_data_activity[,c(8,9)])
+```
+
+```{r}
+ccm_table <- data.frame('Comparison' = c('phoBAva', 
+                                        'phoBMvE', 'Random CTRL2/2'),
+                       'Gene space' = c(ccm22_norm_sse1$error_ratio, ccm22_norm_sse2$error_ratio,
+                                        ccm22_norm_rand_sse$error_ratio),
+                       'Feature space' = c(ccm22_act_sse1$error_ratio, ccm22_act_sse2$error_ratio,
+                                        ccm22_act_rand_sse$error_ratio)
+                       )
+kable(ccm_table)
+```
+
+
+
+
+#### Coculture
+
+```{r, warning=F}
+rand_group55_a <- sample(c(2:11),5)
+rand_group55_b <- setdiff(c(2:11),rand_group_a)
+
+cc55_norm_rand_sse <- sse_ratio(cc_data_normed[,rand_group_a],
+                              cc_data_normed[rand_group_b])
+cc55_act_rand_sse <-sse_ratio(cc_data_activity[,rand_group_a],
+                            cc_data_activity[,rand_group_b])
+
+cc55_norm_sse <- sse_ratio(cc_data_normed[,c(2:6)], cc_data_normed[,c(7:11)])
+cc55_act_sse <-sse_ratio(cc_data_activity[,c(2:6)], cc_data_activity[,c(7:11)])
+
+```
+
+
+```{r}
+rand_group103_a <- sample(c(2:14),3)
+rand_group103_b <- setdiff(c(2:14),rand_group_a)
+
+cc103_norm_rand_sse <- sse_ratio(cc_data_normed[,rand_group_a],
+                                cc_data_normed[rand_group_b])
+cc103_act_rand_sse <- sse_ratio(cc_data_activity[,rand_group_a],
+                                cc_data_activity[,rand_group_b])
+
+cc103_norm_sse <- sse_ratio(cc_data_normed[,c(2:11)], cc_data_normed[,c(12:14)])
+cc103_act_sse <-sse_ratio(cc_data_activity[,c(2:11)], cc_data_activity[,c(12:14)])
+```
+
+```{r}
+rand_group53_a <- sample(c(c(2:6),12,13,14),5)
+rand_group53_b <- setdiff(c(c(2:6),12,13,14),rand_group_a)
+
+cc53_norm_rand_sse <- sse_ratio(cc_data_normed[,rand_group_a],
+                                cc_data_normed[rand_group_b])
+cc53_act_rand_sse <- sse_ratio(cc_data_activity[,rand_group_a],
+                               cc_data_activity[,rand_group_b])
+
+
+cc53_norm_sse <- sse_ratio(cc_data_normed[,c(2:6)], cc_data_normed[,c(12:14)])
+cc53_act_sse <- sse_ratio(cc_data_activity[,c(2:6)], cc_data_activity[,c(12:14)])
+```
+
+```{r}
+cc_table <- data.frame('Comparison' = c('MonovCo', 'Random CTRL3/10', 
+                                        'WTvMut', 'Random CTRL5/5',
+                                        'WTvCo', 'Random CTRL3/5'),
+                       'Gene space' = c(cc103_norm_sse$error_ratio, cc103_norm_rand_sse$error_ratio,
+                                        cc55_norm_sse$error_ratio,  cc55_norm_rand_sse$error_ratio,
+                                        cc53_norm_sse$error_ratio,  cc53_norm_rand_sse$error_ratio),
+                       'Feature space' = c(cc103_act_sse$error_ratio, cc103_act_rand_sse$error_ratio,
+                                        cc55_act_sse$error_ratio,  cc55_act_rand_sse$error_ratio,
+                                        cc53_act_sse$error_ratio,  cc53_act_rand_sse$error_ratio)
+                       )
+kable(cc_table)
+```
+
+
+
+#### Sputum
+
+```{r, warning=F}
+rand_group22_a <- sample(c("ctrl_1","ctrl_2","ctrl_3","sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A"),3)
+rand_group22_b <- setdiff(c("ctrl_1","ctrl_2","ctrl_3","sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A"),rand_group_a)
+
+sp36_norm_rand_sse <- sse_ratio(sp_data_normed[,rand_group_a], 
+          sp_data_normed[,rand_group_b])
+
+sp36_act_rand_sse <- sse_ratio(sp_data_activity[,rand_group_a], 
+          sp_data_activity[,rand_group_b])
+```
+
+```{r}
+sp_norm_sse <- sse_ratio(sp_data_normed[,c("ctrl_1","ctrl_2","ctrl_3")], 
+          sp_data_normed[,c("sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A")])
+```
+
+```{r}
+sp_act_sse <- sse_ratio(sp_data_activity[,c("ctrl_1","ctrl_2","ctrl_3")], 
+          sp_data_activity [,c("sp1B1","sp2A2","sp3A","sp4A1","sp5A","sp6A")])
+```
+
+```{r}
+sp_table <- data.frame('Comparison' = c('M63vSputum', 'Random CTRL'),
+                       'Gene space' = c(sp_norm_sse$error_ratio, sp36_norm_rand_sse$error_ratio),
+                       'Feature space' = c(sp_act_sse$error_ratio,sp36_act_rand_sse$error_ratio)
+                       )
+kable(sp_table)
+```
+
