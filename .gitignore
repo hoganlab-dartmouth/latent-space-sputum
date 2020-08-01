@@ -1,5 +1,5 @@
 # Data files
-data/*.csv
+
 data/all_samples/*.csv
 .DS_Store
 
